@@ -12,6 +12,7 @@ from utils import SegPyError
 
 
 LOGGER = logging.getLogger("segpy.gt3")
+_COUNT_MISMATCH_WARNED: set[Path] = set()
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,12 @@ def _valid_xy(x: float, y: float, width: int, height: int) -> bool:
     return -0.5 <= x <= width + 0.5 and -0.5 <= y <= height + 0.5
 
 
+def _polygon_area(points: np.ndarray) -> float:
+    x = points[:, 0]
+    y = points[:, 1]
+    return float(0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+
 def parse_gt3(
     gt3_path: str | Path,
     image_size: tuple[int, int],
@@ -90,38 +97,44 @@ def parse_gt3(
         expected_count = None
 
     contours: list[Gt3Contour] = []
-    offset = 0
-    while offset <= len(data) - 8:
+    for offset in range(0, len(data) - 64, 4):
         try:
-            x = _f32(data, offset)
-            y = _f32(data, offset + 4)
+            point_count = _u32(data, offset)
+            point_count_repeat = _u32(data, offset + 4)
         except struct.error:
-            break
+            continue
+        if point_count != point_count_repeat:
+            continue
+        if point_count < min_points or point_count > 10000:
+            continue
 
-        if not _valid_xy(x, y, width, height):
-            offset += 4
+        points_offset = offset + 56
+        points_end = points_offset + int(point_count) * 8
+        if points_end > len(data):
             continue
 
         points: list[tuple[float, float]] = []
-        cursor = offset
-        while cursor <= len(data) - 8:
-            x = _f32(data, cursor)
-            y = _f32(data, cursor + 4)
+        valid = True
+        for point_index in range(int(point_count)):
+            point_offset = points_offset + point_index * 8
+            x = _f32(data, point_offset)
+            y = _f32(data, point_offset + 4)
             if not _valid_xy(x, y, width, height):
+                valid = False
                 break
             points.append((x, y))
-            cursor += 8
+        if not valid:
+            continue
 
-        if len(points) >= min_points:
-            array = np.asarray(points, dtype=np.float32)
-            contour = Gt3Contour(points=array, byte_offset=offset)
-            min_x, min_y, max_x, max_y = contour.bounds
-            if contour.area >= min_area and (max_x - min_x) >= 1.0 and (max_y - min_y) >= 1.0:
-                contours.append(contour)
-                offset = cursor
-                continue
-
-        offset += 4
+        array = np.asarray(points, dtype=np.float32)
+        min_x = float(array[:, 0].min())
+        min_y = float(array[:, 1].min())
+        max_x = float(array[:, 0].max())
+        max_y = float(array[:, 1].max())
+        area = _polygon_area(array)
+        if area < min_area or (max_x - min_x) < 1.0 or (max_y - min_y) < 1.0:
+            continue
+        contours.append(Gt3Contour(points=array, byte_offset=offset))
 
     if not contours:
         raise SegPyError(
@@ -129,13 +142,19 @@ def parse_gt3(
             f"imageSize={width}x{height}, bytes={len(data)}"
         )
 
-    if expected_count is not None and expected_count != len(contours):
+    resolved_path = path.resolve()
+    if (
+        expected_count is not None
+        and expected_count != len(contours)
+        and resolved_path not in _COUNT_MISMATCH_WARNED
+    ):
         LOGGER.warning(
             "Parsed contour count differs from .gt3 header for %s: header=%s parsed=%s",
             path,
             expected_count,
             len(contours),
         )
+        _COUNT_MISMATCH_WARNED.add(resolved_path)
 
     return Gt3Annotation(path=path, expected_count=expected_count, contours=contours)
 
@@ -151,4 +170,3 @@ def annotation_to_mask(annotation: Gt3Annotation, image_size: tuple[int, int]) -
     if int(mask.sum()) <= 0:
         raise SegPyError(f"Parsed contours produced an empty mask: {annotation.path}")
     return mask
-

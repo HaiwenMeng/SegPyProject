@@ -28,6 +28,10 @@ py E:\TruthEye\WorkDir\SegPyProject\export_onnx.py `
   --output E:\TruthEye\WorkDir\SegPyProject\outputs\onnx\svgf16_rf64.onnx
 ```
 
+```powershell
+E:\TruthEye\WorkDir\PythonEnv11-GPU\python.exe export_onnx.py --checkpoint E:\TruthEye\WorkDir\SegPyProject\outputs\checkpoints\svgf16_rf64_best.pt --output E:\TruthEye\WorkDir\SegPyProject\outputs\onnx\svgf16_rf64.onnx
+```
+
 ## Predict
 
 ```powershell
@@ -48,4 +52,3 @@ Prediction writes:
 - Training uses real images from `1\SrcImage`.
 - The first version is binary segmentation: `BG` vs `defect foreground`.
 - Missing dependencies or invalid annotations fail with explicit `errorMessage`; no mock masks or fake successful outputs are produced.
-

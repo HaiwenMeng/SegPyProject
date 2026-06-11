@@ -81,6 +81,7 @@ class TEDataloader(Dataset):  # type: ignore[misc]
             image_path = self._match_image(gt_path.stem)
             self.samples.append(TESample(gt_path=gt_path, image_path=image_path, name=gt_path.stem))
 
+        self._sample_cache: dict[Path, tuple[Image.Image, np.ndarray]] = {}
         if validate_masks:
             for sample in self.samples:
                 _, mask = self.load_full_sample(sample)
@@ -111,9 +112,13 @@ class TEDataloader(Dataset):  # type: ignore[misc]
         return len(self.samples) * self.samples_per_image
 
     def load_full_sample(self, sample: TESample) -> tuple[Image.Image, np.ndarray]:
+        cached = self._sample_cache.get(sample.gt_path)
+        if cached is not None:
+            return cached
         image = read_rgb_image(sample.image_path)
         annotation = parse_gt3(sample.gt_path, image.size)
         mask = annotation_to_mask(annotation, image.size)
+        self._sample_cache[sample.gt_path] = (image, mask)
         return image, mask
 
     @staticmethod
@@ -172,4 +177,3 @@ class TEDataloader(Dataset):  # type: ignore[misc]
             "gt_path": str(sample.gt_path),
             "crop": torch.tensor([x0, y0, x1, y1], dtype=torch.int64),
         }
-
