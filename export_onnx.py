@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from seg_models import build_svgf16_from_checkpoint
-from utils import SegPyError, ensure_dir, require_torch, setup_logging, write_json_result
+from utils import SegPyError, ensure_dir, load_torch_checkpoint, require_torch, setup_logging, write_json_result
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -25,7 +25,7 @@ def export_onnx(args: argparse.Namespace) -> dict[str, object]:
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.exists():
         raise SegPyError(f"Checkpoint does not exist: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=args.device)
+    checkpoint = load_torch_checkpoint(checkpoint_path, map_location=args.device)
     model = build_svgf16_from_checkpoint(checkpoint, device=args.device)
 
     output_path = Path(args.output)
@@ -75,4 +75,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -150,8 +150,6 @@ class SVGF16(nn.Module if nn is not None else object):  # type: ignore[misc]
 
     @staticmethod
     def _match_spatial(x: Any, reference: Any) -> Any:
-        if x.shape[-2:] == reference.shape[-2:]:
-            return x
         return F.interpolate(x, size=reference.shape[-2:], mode="bilinear", align_corners=False)
 
     def forward(self, x: Any) -> Any:
@@ -172,12 +170,10 @@ class SVGF16(nn.Module if nn is not None else object):  # type: ignore[misc]
             x = dec(x)
 
         x = self.final_up(x)
-        if x.shape[-2:] != input_size:
-            x = F.interpolate(x, size=input_size, mode="bilinear", align_corners=False)
+        x = F.interpolate(x, size=input_size, mode="bilinear", align_corners=False)
         x = self.final_dec(x)
         logits = self.classifier(x)
-        if logits.shape[-2:] != input_size:
-            logits = F.interpolate(logits, size=input_size, mode="bilinear", align_corners=False)
+        logits = F.interpolate(logits, size=input_size, mode="bilinear", align_corners=False)
         return logits
 
 
@@ -198,4 +194,3 @@ def build_svgf16_from_checkpoint(checkpoint: dict[str, Any], device: str = "cpu"
     model.to(device)
     model.eval()
     return model
-

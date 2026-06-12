@@ -19,6 +19,8 @@ _COUNT_MISMATCH_WARNED: set[Path] = set()
 class Gt3Contour:
     points: np.ndarray
     byte_offset: int
+    class_id: int
+    raw_gt_value: int
 
     @property
     def area(self) -> float:
@@ -134,7 +136,27 @@ def parse_gt3(
         area = _polygon_area(array)
         if area < min_area or (max_x - min_x) < 1.0 or (max_y - min_y) < 1.0:
             continue
-        contours.append(Gt3Contour(points=array, byte_offset=offset))
+
+        if offset < 24:
+            continue
+        raw_gt_value = _u32(data, offset - 24)
+        class_id = int(raw_gt_value) - 2
+        if class_id <= 0:
+            LOGGER.info(
+                "Skip non-foreground .gt3 contour: path=%s offset=%s rawGtValue=%s",
+                path,
+                offset,
+                raw_gt_value,
+            )
+            continue
+        contours.append(
+            Gt3Contour(
+                points=array,
+                byte_offset=offset,
+                class_id=class_id,
+                raw_gt_value=int(raw_gt_value),
+            )
+        )
 
     if not contours:
         raise SegPyError(
@@ -165,7 +187,9 @@ def annotation_to_mask(annotation: Gt3Annotation, image_size: tuple[int, int]) -
     draw = ImageDraw.Draw(mask_image)
     for contour in annotation.contours:
         points = [(float(x), float(y)) for x, y in contour.points]
-        draw.polygon(points, fill=1)
+        if contour.class_id <= 0:
+            continue
+        draw.polygon(points, fill=int(contour.class_id))
     mask = np.asarray(mask_image, dtype=np.uint8)
     if int(mask.sum()) <= 0:
         raise SegPyError(f"Parsed contours produced an empty mask: {annotation.path}")

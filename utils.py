@@ -40,6 +40,58 @@ def require_torch():
     return torch
 
 
+def require_opencv():
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:  # pragma: no cover - depends on runtime env
+        raise DependencyError(
+            "OpenCV is required for instance postprocessing. Install opencv-python before running this command."
+        ) from exc
+    return cv2
+
+
+def load_torch_checkpoint(checkpoint_path: str | Path, map_location: str = "cpu") -> dict[str, Any]:
+    torch = require_torch()
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    if not isinstance(checkpoint, dict):
+        raise SegPyError(f"Checkpoint must be a dict, got {type(checkpoint).__name__}: {checkpoint_path}")
+    return checkpoint
+
+
+def str2bool(value: bool | str) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    raise SegPyError(f"Invalid boolean value: {value!r}")
+
+
+def stable_color(index: int) -> tuple[int, int, int]:
+    palette = [
+        (0, 255, 0),
+        (255, 64, 64),
+        (64, 160, 255),
+        (255, 192, 0),
+        (192, 64, 255),
+        (0, 220, 220),
+        (255, 96, 192),
+        (128, 255, 96),
+    ]
+    if index < len(palette):
+        return palette[index]
+    return (
+        int((37 * index + 53) % 200 + 40),
+        int((83 * index + 97) % 200 + 40),
+        int((131 * index + 17) % 200 + 40),
+    )
+
+
 def ensure_dir(path: str | Path) -> Path:
     target = Path(path)
     target.mkdir(parents=True, exist_ok=True)
@@ -107,4 +159,3 @@ def receptive_field_to_stride(receptive_field: int) -> int:
             f"Unsupported receptive_field={receptive_field}. Supported values: {sorted(mapping)}"
         )
     return mapping[receptive_field]
-

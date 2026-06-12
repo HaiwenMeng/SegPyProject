@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from dataloader import TEDataloader
+from dataloader import TEDataloader, YOLOSegDataloader
 from seg_models import SVGF16
 from te_pretrain import DEFAULT_PRETRAIN_PATH
 from utils import SegPyError, checkpoint_default_path, ensure_dir, require_torch, setup_logging, write_json_result
@@ -15,11 +15,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train SVGF16 segmentation model from TeAiFlow .gt3 annotations.")
-    parser.add_argument("--gt-dir", required=True, help="Directory containing TeAiFlow .gt3 annotations.")
+    parser = argparse.ArgumentParser(description="Train SVGF16 segmentation model from .gt3 or YOLO segmentation data.")
+    parser.add_argument("--dataset-type", default="gt3", choices=["gt3", "yolo"])
+    parser.add_argument("--gt-dir", default=None, help="Directory containing TeAiFlow .gt3 annotations.")
     parser.add_argument("--image-dir", default=None, help="Source image directory. Defaults to gt_dir/../1/SrcImage.")
+    parser.add_argument("--dataset-yaml", default=None, help="YOLO dataset.yaml path.")
+    parser.add_argument("--yolo-image-dir", default=None, help="YOLO image directory.")
+    parser.add_argument("--yolo-label-dir", default=None, help="YOLO label directory.")
+    parser.add_argument("--split", default="train", help="YOLO dataset.yaml split name.")
     parser.add_argument("--receptive-field", type=int, default=64, choices=[32, 64, 128, 256])
-    parser.add_argument("--num-classes", type=int, default=2)
+    parser.add_argument("--num-classes", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -52,14 +57,42 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     if args.lr <= 0:
         raise SegPyError(f"lr must be > 0, got {args.lr}")
 
-    dataset = TEDataloader(
-        gt_dir=args.gt_dir,
-        image_dir=args.image_dir,
-        receptive_field=args.receptive_field,
-        patch_size=args.patch_size,
-        samples_per_image=args.samples_per_image,
-        positive_ratio=args.positive_ratio,
-    )
+    if args.dataset_type == "gt3":
+        if args.gt_dir is None:
+            raise SegPyError("--gt-dir is required when --dataset-type gt3")
+        dataset = TEDataloader(
+            gt_dir=args.gt_dir,
+            image_dir=args.image_dir,
+            receptive_field=args.receptive_field,
+            patch_size=args.patch_size,
+            samples_per_image=args.samples_per_image,
+            positive_ratio=args.positive_ratio,
+        )
+    else:
+        dataset = YOLOSegDataloader(
+            dataset_yaml=args.dataset_yaml,
+            image_dir=args.yolo_image_dir,
+            label_dir=args.yolo_label_dir,
+            split=args.split,
+            receptive_field=args.receptive_field,
+            patch_size=args.patch_size,
+            samples_per_image=args.samples_per_image,
+            positive_ratio=args.positive_ratio,
+        )
+    inferred_num_classes = int(dataset.num_classes)
+    if args.num_classes is not None:
+        if args.num_classes < inferred_num_classes:
+            raise SegPyError(
+                f"--num-classes is smaller than dataset labels require: "
+                f"numClasses={args.num_classes}, required={inferred_num_classes}"
+            )
+        num_classes = int(args.num_classes)
+        classes = list(dataset.classes)
+        while len(classes) < num_classes:
+            classes.append(f"class_{len(classes)}")
+    else:
+        num_classes = inferred_num_classes
+        classes = list(dataset.classes)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -70,7 +103,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     model = SVGF16(
         receptive_field=args.receptive_field,
-        num_classes=args.num_classes,
+        num_classes=num_classes,
         pretrained_path=args.pretrained_path,
         load_pretrained=not args.no_pretrained,
     ).to(device)
@@ -116,21 +149,25 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "class_name": "SVGF16",
                     "receptive_field": args.receptive_field,
                     "in_channels": 3,
-                    "num_classes": args.num_classes,
+                    "num_classes": num_classes,
                 },
-                "classes": ["BG", "defect"],
+                "classes": classes,
                 "preprocessing": {
                     "input_scale": "0..1",
                     "patch_size": dataset.patch_size,
                     "positive_ratio": args.positive_ratio,
                 },
                 "training": {
+                    "dataset_type": args.dataset_type,
+                    "class_mode": "multiclass",
                     "epoch": epoch,
                     "best_loss": best_loss,
                     "batch_size": args.batch_size,
                     "lr": args.lr,
-                    "gt_dir": str(Path(args.gt_dir)),
+                    "gt_dir": str(Path(args.gt_dir)) if args.gt_dir is not None else None,
                     "image_dir": str(dataset.image_dir),
+                    "label_dir": str(getattr(dataset, "label_dir", "")),
+                    "dataset_yaml": str(Path(args.dataset_yaml)) if args.dataset_yaml is not None else None,
                     "samples": len(dataset.samples),
                     "samples_per_image": args.samples_per_image,
                 },
@@ -145,6 +182,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "bestEpoch": best_epoch,
         "samples": len(dataset.samples),
         "patchSize": dataset.patch_size,
+        "numClasses": num_classes,
+        "classes": classes,
+        "datasetType": args.dataset_type,
     }
 
 
@@ -163,4 +203,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

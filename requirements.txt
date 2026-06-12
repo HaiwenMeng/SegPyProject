@@ -2,4 +2,5 @@ numpy
 pillow
 torch
 onnx
-
+pyyaml
+opencv-python
