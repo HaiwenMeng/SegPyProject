@@ -29,7 +29,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Predict YOLO-seg style instances with a trained SVGF16 checkpoint.")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--image", default=None)
-    parser.add_argument("--image-dir", default=None)
+    parser.add_argument("--image-dir", "--folder", dest="image_dir", default=None)
     parser.add_argument("--output-dir", "--output_dir", dest="output_dir", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--alpha", type=float, default=0.45)
@@ -44,9 +44,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def iter_images(image: str | None, image_dir: str | None) -> list[Path]:
     if image and image_dir:
-        raise SegPyError("Use only one of --image or --image-dir.")
+        raise SegPyError("Use only one of --image, --image-dir, or --folder.")
     if not image and not image_dir:
-        raise SegPyError("One of --image or --image-dir is required.")
+        raise SegPyError("One of --image, --image-dir, or --folder is required.")
     if image:
         path = Path(image)
         if not path.exists():
@@ -54,14 +54,14 @@ def iter_images(image: str | None, image_dir: str | None) -> list[Path]:
         return [path]
     root = Path(image_dir or "")
     if not root.exists() or not root.is_dir():
-        raise SegPyError(f"image-dir does not exist or is not a directory: {root}")
+        raise SegPyError(f"image-dir/folder does not exist or is not a directory: {root}")
     images = [
         item
         for item in sorted(root.iterdir())
-        if item.is_file() and item.suffix.lower() in {".bmp", ".png", ".jpg", ".jpeg"}
+        if item.is_file() and item.suffix.lower() in {".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
     ]
     if not images:
-        raise SegPyError(f"No images found in image-dir: {root}")
+        raise SegPyError(f"No images found in image-dir/folder: {root}")
     return images
 
 

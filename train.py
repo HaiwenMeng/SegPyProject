@@ -115,10 +115,16 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     ensure_dir(output_path.parent)
     best_loss = float("inf")
     best_epoch = -1
+    last_pos_acc = float("nan")
+    last_neg_acc = float("nan")
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
+        pos_correct = 0
+        pos_total = 0
+        neg_correct = 0
+        neg_total = 0
         steps = 0
         for batch in loader:
             images = batch["image"].to(device, non_blocking=True)
@@ -132,13 +138,42 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             loss = criterion(logits, masks)
             loss.backward()
             optimizer.step()
+
+            with torch.no_grad():
+                pred = torch.argmax(logits.detach(), dim=1)
+                target_pos = masks > 0
+                target_neg = masks == 0
+                pred_pos = pred > 0
+                pred_neg = pred == 0
+                pos_correct += int((pred_pos & target_pos).sum().item())
+                pos_total += int(target_pos.sum().item())
+                neg_correct += int((pred_neg & target_neg).sum().item())
+                neg_total += int(target_neg.sum().item())
+
             total_loss += float(loss.detach().cpu())
             steps += 1
 
         if steps <= 0:
             raise SegPyError("Training DataLoader produced no batches.")
         avg_loss = total_loss / steps
-        logger.info("epoch=%s/%s loss=%.6f", epoch, args.epochs, avg_loss)
+        if pos_total > 0:
+            last_pos_acc = pos_correct / pos_total
+        else:
+            last_pos_acc = float("nan")
+            logger.warning("No positive foreground pixels were seen in epoch=%s; pos_acc=nan", epoch)
+        if neg_total > 0:
+            last_neg_acc = neg_correct / neg_total
+        else:
+            last_neg_acc = float("nan")
+            logger.warning("No background pixels were seen in epoch=%s; neg_acc=nan", epoch)
+        logger.info(
+            "epoch=%s/%s loss=%.6f pos_acc=%.4f neg_acc=%.4f",
+            epoch,
+            args.epochs,
+            avg_loss,
+            last_pos_acc,
+            last_neg_acc,
+        )
 
         if avg_loss < best_loss:
             best_loss = avg_loss
@@ -180,6 +215,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "checkpoint": str(output_path),
         "bestLoss": best_loss,
         "bestEpoch": best_epoch,
+        "lastPosAcc": last_pos_acc,
+        "lastNegAcc": last_neg_acc,
         "samples": len(dataset.samples),
         "patchSize": dataset.patch_size,
         "numClasses": num_classes,

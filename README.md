@@ -76,6 +76,20 @@ py E:\TruthEye\WorkDir\SegPyProject\predict.py `
   --max-det 1000
 ```
 
+Folder prediction uses the same output format:
+
+```powershell
+py E:\TruthEye\WorkDir\SegPyProject\predict.py `
+  --checkpoint E:\TruthEye\WorkDir\SegPyProject\outputs\checkpoints\svgf16_rf64_best.pt `
+  --folder E:\TruthEye\WorkDir\testSegemnt\TestSeg\1\SrcImage `
+  --output-dir E:\TruthEye\WorkDir\SegPyProject\outputs\predict_instances `
+  --conf 0.2 `
+  --iou 0.5 `
+  --save-txt true `
+  --show false `
+  --max-det 1000
+```
+
 Prediction writes:
 
 - `*_label.png`: multiclass label image, `0=BG`, foreground classes start at `1`.
