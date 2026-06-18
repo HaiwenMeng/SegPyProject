@@ -82,6 +82,7 @@ class _PatchSegDataset(Dataset):  # type: ignore[misc]
         samples_per_image: int = 64,
         positive_ratio: float = 0.5,
         allow_empty_mask: bool = False,
+        cache_samples: bool = True,
     ):
         _require_torch()
         self.receptive_field = int(receptive_field)
@@ -89,6 +90,7 @@ class _PatchSegDataset(Dataset):  # type: ignore[misc]
         self.samples_per_image = int(samples_per_image)
         self.positive_ratio = float(positive_ratio)
         self.allow_empty_mask = bool(allow_empty_mask)
+        self.cache_samples = bool(cache_samples)
         self._sample_cache: dict[Path, tuple[Image.Image, np.ndarray]] = {}
         self.samples: list[SegSample] = []
         self.classes: list[str] = ["BG", "defect"]
@@ -113,9 +115,10 @@ class _PatchSegDataset(Dataset):  # type: ignore[misc]
         raise NotImplementedError
 
     def load_full_sample(self, sample: SegSample) -> tuple[Image.Image, np.ndarray]:
-        cached = self._sample_cache.get(sample.label_path)
-        if cached is not None:
-            return cached
+        if self.cache_samples:
+            cached = self._sample_cache.get(sample.label_path)
+            if cached is not None:
+                return cached
         image = read_rgb_image(sample.image_path)
         mask = self._load_mask(sample, image)
         if self._label_range_ready and int(mask.max()) > self.max_label:
@@ -125,8 +128,12 @@ class _PatchSegDataset(Dataset):  # type: ignore[misc]
             )
         if int(mask.sum()) <= 0 and not self.allow_empty_mask:
             raise SegPyError(f"Mask is empty for sample: {sample.label_path}")
-        self._sample_cache[sample.label_path] = (image, mask)
+        if self.cache_samples:
+            self._sample_cache[sample.label_path] = (image, mask)
         return image, mask
+
+    def clear_cache(self) -> None:
+        self._sample_cache.clear()
 
     @staticmethod
     def _pad_for_crop(image: np.ndarray, mask: np.ndarray, patch_size: int) -> tuple[np.ndarray, np.ndarray]:
@@ -198,6 +205,7 @@ class TEDataloader(_PatchSegDataset):
         samples_per_image: int = 64,
         positive_ratio: float = 0.5,
         validate_masks: bool = True,
+        cache_samples: bool = True,
     ):
         super().__init__(
             receptive_field=receptive_field,
@@ -205,6 +213,7 @@ class TEDataloader(_PatchSegDataset):
             samples_per_image=samples_per_image,
             positive_ratio=positive_ratio,
             allow_empty_mask=False,
+            cache_samples=cache_samples,
         )
         self.gt_dir = Path(gt_dir)
         if not self.gt_dir.exists():
@@ -287,6 +296,7 @@ class YOLOSegDataloader(_PatchSegDataset):
         samples_per_image: int = 64,
         positive_ratio: float = 0.5,
         validate_masks: bool = True,
+        cache_samples: bool = True,
     ):
         super().__init__(
             receptive_field=receptive_field,
@@ -294,6 +304,7 @@ class YOLOSegDataloader(_PatchSegDataset):
             samples_per_image=samples_per_image,
             positive_ratio=positive_ratio,
             allow_empty_mask=True,
+            cache_samples=cache_samples,
         )
         names: list[str] | None = None
         if dataset_yaml is not None:

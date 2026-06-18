@@ -64,6 +64,25 @@ def _mask_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
     return 0.0 if union <= 0 else float(intersection) / float(union)
 
 
+def _instance_mask_iou(a: InstancePrediction, b: InstancePrediction) -> float:
+    ax1, ay1, ax2, ay2 = a.bbox
+    bx1, by1, bx2, by2 = b.bbox
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    if ix1 >= ix2 or iy1 >= iy2:
+        return 0.0
+
+    a_crop = a._mask[iy1 - ay1 : iy2 - ay1, ix1 - ax1 : ix2 - ax1]
+    b_crop = b._mask[iy1 - by1 : iy2 - by1, ix1 - bx1 : ix2 - bx1]
+    intersection = int(np.logical_and(a_crop, b_crop).sum())
+    if intersection <= 0:
+        return 0.0
+    union = int(a.area + b.area - intersection)
+    return 0.0 if union <= 0 else float(intersection) / float(union)
+
+
 def _bbox_from_mask(mask: np.ndarray) -> list[int]:
     ys, xs = np.where(mask)
     if len(xs) == 0:
@@ -103,19 +122,30 @@ def postprocess_logits(
     conf: float = 0.2,
     iou: float = 0.5,
     max_det: int = 1000,
+    min_pixel: int = 1,
+    mask_thresh: float = 0.0,
 ) -> InstanceSegResult:
     if not 0.0 <= conf <= 1.0:
         raise SegPyError(f"conf must be in [0,1], got {conf}")
     if not 0.0 <= iou <= 1.0:
         raise SegPyError(f"iou must be in [0,1], got {iou}")
+    if not 0.0 <= mask_thresh <= 1.0:
+        raise SegPyError(f"mask_thresh must be in [0,1], got {mask_thresh}")
     if max_det <= 0 or max_det > 65535:
         raise SegPyError(f"max_det must be in [1,65535], got {max_det}")
+    if min_pixel <= 0:
+        raise SegPyError(f"min_pixel must be > 0, got {min_pixel}")
     if not np.all(np.isfinite(logits)):
         raise SegPyError("logits contain NaN or Inf values.")
 
     probs = _softmax(logits.astype(np.float32, copy=False))
-    label_map = np.argmax(probs, axis=0).astype(np.uint8)
-    binary_mask = (label_map > 0).astype(np.uint8) * 255
+    raw_label_map = np.argmax(probs, axis=0).astype(np.uint8)
+    raw_score_map = np.take_along_axis(probs, raw_label_map[None, :, :], axis=0)[0]
+    label_map = np.where(
+        (raw_label_map > 0) & (raw_score_map >= mask_thresh),
+        raw_label_map,
+        0,
+    ).astype(np.uint8)
     num_classes = int(logits.shape[0])
     class_names = _normalize_classes(classes, num_classes)
     height, width = label_map.shape
@@ -130,15 +160,18 @@ def postprocess_logits(
         for component_id in range(1, component_count):
             component_mask = component_labels == component_id
             area = int(component_mask.sum())
-            if area <= 0:
+            if area < min_pixel:
                 continue
             score = float(probs[class_id][component_mask].mean())
             if score < conf:
                 continue
-            polygon = _polygon_from_mask(component_mask)
+            bbox = _bbox_from_mask(component_mask)
+            x1, y1, x2, y2 = bbox
+            component_crop = component_mask[y1:y2, x1:x2].copy()
+            polygon = _polygon_from_mask(component_crop)
             if not polygon:
                 continue
-            bbox = _bbox_from_mask(component_mask)
+            polygon = [[int(x + x1), int(y + y1)] for x, y in polygon]
             candidates.append(
                 InstancePrediction(
                     id=0,
@@ -149,7 +182,7 @@ def postprocess_logits(
                     polygon=polygon,
                     bbox=bbox,
                     area=area,
-                    _mask=component_mask,
+                    _mask=component_crop,
                 )
             )
 
@@ -158,7 +191,7 @@ def postprocess_logits(
     for candidate in candidates:
         suppressed = False
         for existing in selected:
-            if candidate.class_id == existing.class_id and _mask_iou(candidate._mask, existing._mask) > iou:
+            if candidate.class_id == existing.class_id and _instance_mask_iou(candidate, existing) > iou:
                 suppressed = True
                 break
         if suppressed:
@@ -168,12 +201,18 @@ def postprocess_logits(
         if len(selected) >= max_det:
             break
 
+    filtered_label_map = np.zeros((height, width), dtype=np.uint8)
     instance_mask = np.zeros((height, width), dtype=np.uint16)
     for item in selected:
-        instance_mask[item._mask] = int(item.id)
+        x1, y1, x2, y2 = item.bbox
+        instance_target = instance_mask[y1:y2, x1:x2]
+        instance_target[item._mask] = int(item.id)
+        label_target = filtered_label_map[y1:y2, x1:x2]
+        label_target[item._mask] = int(item.class_id)
+    binary_mask = (filtered_label_map > 0).astype(np.uint8) * 255
 
     return InstanceSegResult(
-        label_map=label_map,
+        label_map=filtered_label_map,
         binary_mask=binary_mask,
         instance_mask=instance_mask,
         instances=selected,

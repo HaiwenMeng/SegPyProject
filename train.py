@@ -8,7 +8,15 @@ from typing import Any
 from dataloader import TEDataloader, YOLOSegDataloader
 from seg_models import SVGF16
 from te_pretrain import DEFAULT_PRETRAIN_PATH
-from utils import SegPyError, checkpoint_default_path, ensure_dir, require_torch, setup_logging, write_json_result
+from utils import (
+    SegPyError,
+    checkpoint_default_path,
+    ensure_dir,
+    load_torch_checkpoint,
+    require_torch,
+    setup_logging,
+    write_json_result,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -32,12 +40,107 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--positive-ratio", type=float, default=0.5)
     parser.add_argument("--patch-size", type=int, default=None)
     parser.add_argument("--output", default=None, help="Checkpoint output path.")
+    parser.add_argument("--pretrain", default=None, help="Path to a PyTorch .pt checkpoint or state_dict.")
     parser.add_argument("--pretrained-path", default=str(DEFAULT_PRETRAIN_PATH))
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--device", default="cuda", help="cuda, cpu, or cuda:0.")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--log-level", default="INFO")
     return parser
+
+
+def _strip_module_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
+    if not state_dict:
+        return state_dict
+    keys = list(state_dict.keys())
+    if all(isinstance(key, str) and key.startswith("module.") for key in keys):
+        return {key[len("module.") :]: value for key, value in state_dict.items()}
+    return state_dict
+
+
+def load_pt_pretrain_weights(model: Any, pretrain_path: str | Path, logger: logging.Logger) -> dict[str, Any]:
+    path = Path(pretrain_path)
+    if not path.exists():
+        raise SegPyError(f"PyTorch pretrain checkpoint does not exist: {path}")
+    if not path.is_file():
+        raise SegPyError(f"PyTorch pretrain checkpoint path is not a file: {path}")
+
+    checkpoint = load_torch_checkpoint(path, map_location="cpu")
+    state_key = "raw_state_dict"
+    if "model_state_dict" in checkpoint:
+        raw_state = checkpoint["model_state_dict"]
+        state_key = "model_state_dict"
+    elif "state_dict" in checkpoint:
+        raw_state = checkpoint["state_dict"]
+        state_key = "state_dict"
+    else:
+        raw_state = checkpoint
+    if not isinstance(raw_state, dict):
+        raise SegPyError(f"PyTorch pretrain checkpoint does not contain a state_dict: {path}")
+    state_dict = _strip_module_prefix(raw_state)
+    model_state = model.state_dict()
+
+    compatible_state: dict[str, Any] = {}
+    skipped_missing = 0
+    skipped_shape = 0
+    skipped_non_tensor = 0
+    skipped_examples: list[str] = []
+
+    for name, tensor in state_dict.items():
+        if name not in model_state:
+            skipped_missing += 1
+            if len(skipped_examples) < 8:
+                skipped_examples.append(f"{name}: not in current model")
+            continue
+        if not hasattr(tensor, "shape"):
+            skipped_non_tensor += 1
+            if len(skipped_examples) < 8:
+                skipped_examples.append(f"{name}: not a tensor")
+            continue
+        if tuple(tensor.shape) != tuple(model_state[name].shape):
+            skipped_shape += 1
+            if len(skipped_examples) < 8:
+                skipped_examples.append(
+                    f"{name}: shape mismatch pretrain={tuple(tensor.shape)} model={tuple(model_state[name].shape)}"
+                )
+            continue
+        compatible_state[name] = tensor
+
+    if not compatible_state:
+        raise SegPyError(
+            f"No compatible tensors were loaded from PyTorch pretrain checkpoint: {path}. "
+            f"skippedMissing={skipped_missing}, skippedShape={skipped_shape}, skippedNonTensor={skipped_non_tensor}"
+        )
+
+    incompatible = model.load_state_dict(compatible_state, strict=False)
+    missing_after_load = len(incompatible.missing_keys)
+    unexpected_after_load = len(incompatible.unexpected_keys)
+    report = {
+        "type": "pt",
+        "path": str(path),
+        "state_key": state_key,
+        "loaded": len(compatible_state),
+        "available": len(state_dict),
+        "skipped_missing": skipped_missing,
+        "skipped_shape": skipped_shape,
+        "skipped_non_tensor": skipped_non_tensor,
+        "model_missing_after_load": missing_after_load,
+        "unexpected_after_load": unexpected_after_load,
+        "skipped_examples": skipped_examples,
+    }
+    logger.info(
+        "PyTorch pretrain load result: loaded=%s available=%s skipped_missing=%s skipped_shape=%s "
+        "skipped_non_tensor=%s path=%s",
+        report["loaded"],
+        report["available"],
+        skipped_missing,
+        skipped_shape,
+        skipped_non_tensor,
+        path,
+    )
+    if skipped_examples:
+        logger.info("PyTorch pretrain skipped examples: %s", skipped_examples)
+    return report
 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
@@ -56,6 +159,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         raise SegPyError(f"batch-size must be > 0, got {args.batch_size}")
     if args.lr <= 0:
         raise SegPyError(f"lr must be > 0, got {args.lr}")
+    if args.pretrain is not None and args.no_pretrained:
+        raise SegPyError("Use either --pretrain or --no-pretrained, not both.")
 
     if args.dataset_type == "gt3":
         if args.gt_dir is None:
@@ -105,8 +210,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         receptive_field=args.receptive_field,
         num_classes=num_classes,
         pretrained_path=args.pretrained_path,
-        load_pretrained=not args.no_pretrained,
+        load_pretrained=(not args.no_pretrained and args.pretrain is None),
     ).to(device)
+    if args.pretrain is not None:
+        model.pretrain_report = load_pt_pretrain_weights(model, args.pretrain, logger)
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -222,6 +329,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "numClasses": num_classes,
         "classes": classes,
         "datasetType": args.dataset_type,
+        "pretrainReport": getattr(model, "pretrain_report", {}),
     }
 
 
